@@ -1,0 +1,11 @@
+[package]
+name = "rwe"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+crossterm = "0.25"
+tui = "0.19"
+unicode-width = "0.1"
+unicode-segmentation = "1.10"
+copypasta = "0.7"
