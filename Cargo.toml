@@ -9,3 +9,9 @@ tui = "0.19"
 unicode-width = "0.1"
 unicode-segmentation = "1.10"
 copypasta = "0.7"
+
+[profile.release]
+opt-level = "z"        # 0～3または"s"（サイズ最適化）や"z"（極小サイズ最適化）
+lto = true           # リンクタイム最適化を有効にする
+debug = false        # デバッグ情報を含めない
+panic = 'abort'      # パニック時にスタックトレースを出さず、abortする

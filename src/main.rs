@@ -27,6 +27,7 @@ enum PopupMode {
     ExitPrompt,  // 終了／保存確認
     NewFile,     // 新規作成
     Rename,      // 移動／リネーム
+    SaveFile,    // 保存時の名前入力
 }
 
 #[derive(Clone)]
@@ -390,16 +391,18 @@ impl App {
         self.adjust_h_scroll(0);
     }
     fn move_left(&mut self) {
-        if self.cursor_x > 0 { self.cursor_x -= 1; }
-        else if self.cursor_y > 0 {
+        if self.cursor_x > 0 {
+            self.cursor_x -= 1;
+        } else if self.cursor_y > 0 {
             self.cursor_y -= 1;
             self.cursor_x = self.lines[self.cursor_y].len();
         }
     }
     fn move_right(&mut self) {
         let line_len = self.lines[self.cursor_y].len();
-        if self.cursor_x < line_len { self.cursor_x += 1; }
-        else if self.cursor_y + 1 < self.lines.len() {
+        if self.cursor_x < line_len {
+            self.cursor_x += 1;
+        } else if self.cursor_y + 1 < self.lines.len() {
             self.cursor_y += 1;
             self.cursor_x = 0;
         }
@@ -457,11 +460,11 @@ impl App {
     }
     fn move_alt_left(&mut self) {
         for _ in 0..self.alt_n { self.move_left(); }
-        self.alt_n = (self.alt_n * 2).min(128);
+        self.alt_n = (self.alt_n * 2).min(1024);
     }
     fn move_alt_right(&mut self) {
         for _ in 0..self.alt_n { self.move_right(); }
-        self.alt_n = (self.alt_n * 2).min(128);
+        self.alt_n = (self.alt_n * 2).min(1024);
     }
 
     // --- Scrolling ---
@@ -523,17 +526,8 @@ impl App {
         if let Some(ref path) = self.current_file {
             let _ = std::fs::write(path, content);
         } else {
-            disable_raw_mode().unwrap();
-            print!("Enter file name to save: ");
-            io::stdout().flush().unwrap();
-            let mut filename = String::new();
-            io::stdin().read_line(&mut filename).unwrap();
-            let filename = filename.trim();
-            enable_raw_mode().unwrap();
-            if !filename.is_empty() {
-                self.current_file = Some(PathBuf::from(filename));
-                let _ = std::fs::write(filename, content);
-            }
+            self.popup = Some(PopupMode::SaveFile);
+            self.popup_input = String::from("output.txt");
         }
     }
     fn exit_prompt(&mut self) -> Option<String> {
@@ -546,42 +540,63 @@ impl App {
     fn handle_popup(&mut self, key: KeyCode) {
         match key {
             KeyCode::Enter => {
-                if let Some(PopupMode::ExitPrompt) = self.popup {
-                    // 期待入力は e, s, c
-                    let choice = self.popup_input.trim().to_lowercase();
-                    self.popup = None;
-                    // ここはメイン側で判断するようにするため、popup_inputを保持
-                    self.popup_input = choice;
-                } else if let Some(PopupMode::NewFile) = self.popup {
-                    // 新規ファイル作成
-                    let filename = self.popup_input.trim();
-                    if !filename.is_empty() {
-                        let buf_ex = PathBuf::from(".");
-                        let _ = std::fs::create_dir_all(
-                            PathBuf::from(filename).parent().unwrap_or_else(|| &buf_ex) 
-                        );
-                        let _ = std::fs::write(filename, "");
-                        self.current_file = Some(PathBuf::from(filename));
-                        self.lines = vec![String::new()];
-                    }
-                    self.popup = None;
-                    self.popup_input.clear();
-                } else if let Some(PopupMode::Rename) = self.popup {
-                    let newname = self.popup_input.trim();
-                    if !newname.is_empty() {
-                        if let Some(ref old) = self.current_file {
-                            let _ = std::fs::rename(old, newname);
-                            self.current_file = Some(PathBuf::from(newname));
+                match self.popup.clone().unwrap() {
+                    PopupMode::ExitPrompt => {
+                        let choice = self.popup_input.trim().to_lowercase();
+                        self.popup = None;
+                        match choice.as_str() {
+                            "e" | "exit" => std::process::exit(0),
+                            "s" | "save" => { self.save_file(); },
+                            "c" | "cancel" => {},
+                            _ => {},
                         }
+                        self.popup_input.clear();
                     }
-                    self.popup = None;
-                    self.popup_input.clear();
+                    PopupMode::NewFile => {
+                        let filename = self.popup_input.trim();
+                        if !filename.is_empty() {
+                            if let Some(parent) = PathBuf::from(filename).parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
+                            let _ = std::fs::write(filename, "");
+                            self.current_file = Some(PathBuf::from(filename));
+                            self.lines = vec![String::new()];
+                        }
+                        self.popup = None;
+                        self.popup_input.clear();
+                    }
+                    PopupMode::Rename => {
+                        let newname = self.popup_input.trim();
+                        if !newname.is_empty() {
+                            if let Some(ref old) = self.current_file {
+                                if let Ok(_) = std::fs::rename(old, newname) {
+                                    self.current_file = Some(PathBuf::from(newname));
+                                    if let Some(parent) = PathBuf::from(newname).parent() {
+                                        self.file_tree.current_path = parent.to_path_buf();
+                                        self.file_tree.refresh();
+                                        if let Some(pos) = self.file_tree.entries.iter().position(|e| e.path() == PathBuf::from(newname)) {
+                                            self.file_tree.selected = pos;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        self.popup = None;
+                        self.popup_input.clear();
+                    }
+                    PopupMode::SaveFile => {
+                        let filename = self.popup_input.trim();
+                        if !filename.is_empty() {
+                            self.current_file = Some(PathBuf::from(filename));
+                            let content = self.lines.join("\n");
+                            let _ = std::fs::write(filename, content);
+                        }
+                        self.popup = None;
+                        self.popup_input.clear();
+                    }
                 }
             }
-            KeyCode::Esc => {
-                self.popup = None;
-                self.popup_input.clear();
-            }
+            KeyCode::Esc => { self.popup = None; self.popup_input.clear(); }
             KeyCode::Backspace => { self.popup_input.pop(); }
             KeyCode::Char(c) => { self.popup_input.push(c); }
             _ => {}
@@ -629,6 +644,7 @@ impl App {
 }
 
 // --- Drawing functions ---
+
 fn draw_header<B: tui::backend::Backend>(frame: &mut Frame<B>, app: &App, area: Rect) {
     let header_text = if let Some(ref path) = app.current_file {
         let file_name = path.file_name()
@@ -685,41 +701,70 @@ fn draw_editor<B: tui::backend::Backend>(
     // --- テキスト欄 (横スクロール対応) ---
     let available_width = chunks[1].width as usize;
     let mut text_spans = Vec::new();
+    // selection を (start_line, start_col) <= (end_line, end_col) に正規化
     let selection = match (app.sel_start, app.sel_end) {
         (Some(s), Some(e)) => Some(if s <= e { (s, e) } else { (e, s) }),
         _ => None,
     };
+    
     for (i, line) in display_lines.iter().enumerate() {
         let real_line = start + i;
         let graphemes: Vec<&str> = line.graphemes(true).collect();
-        // 横スクロール用：先頭から h_scroll_offset 分を除外
+        // 横スクロール：h_scroll_offset に合わせ、表示開始インデックスを求める
         let mut cum = 0;
-        let mut start_idx = 0;
+        let mut disp_start_idx = 0;
         for (j, g) in graphemes.iter().enumerate() {
             cum += g.width();
             if cum > app.h_scroll_offset {
-                start_idx = j;
+                disp_start_idx = j;
                 break;
             }
         }
-        let mut displayed = String::new();
+        // 表示可能な範囲を取得
+        let mut disp_text = String::new();
         let mut width = 0;
-        for g in graphemes.iter().skip(start_idx) {
+        let mut disp_end_idx = disp_start_idx;
+        for g in graphemes.iter().skip(disp_start_idx) {
             let w = g.width();
-            if width + w > available_width { break; }
-            displayed.push_str(g);
-            width += w;
-        }
-        let span = if let Some(((sy, _), (ey, _))) = selection {
-            if real_line >= sy && real_line <= ey {
-                Spans::from(Span::styled(displayed, Style::default().bg(Color::LightBlue)))
-            } else {
-                Spans::from(Span::raw(displayed))
+            if width + w > available_width {
+                break;
             }
-        } else {
-            Spans::from(Span::raw(displayed))
-        };
-        text_spans.push(span);
+            disp_text.push_str(g);
+            width += w;
+            disp_end_idx += 1;
+        }
+        // 選択範囲がこの行にある場合、部分的にハイライトする
+        if let Some(((sel_line_start, sel_col_start), (sel_line_end, sel_col_end))) = selection {
+            if real_line >= sel_line_start && real_line <= sel_line_end {
+                // この行での選択開始・終了位置（グラフェム単位）
+                let line_len = graphemes.len();
+                let sel_start_idx = if real_line == sel_line_start { sel_col_start } else { 0 };
+                let sel_end_idx = if real_line == sel_line_end { sel_col_end } else { line_len };
+                // 表示範囲と選択範囲の交差部分
+                let disp_sel_start = sel_start_idx.max(disp_start_idx);
+                let disp_sel_end = sel_end_idx.min(disp_end_idx);
+                let mut spans = Vec::new();
+                // pre
+                if disp_sel_start > disp_start_idx {
+                    let pre: String = graphemes[disp_start_idx..disp_sel_start].concat();
+                    spans.push(Span::raw(pre));
+                }
+                // selected
+                if disp_sel_start < disp_sel_end {
+                    let selected: String = graphemes[disp_sel_start..disp_sel_end].concat();
+                    spans.push(Span::styled(selected, Style::default().bg(Color::White).fg(Color::Black)));
+                }
+                // post
+                if disp_sel_end < disp_end_idx {
+                    let post: String = graphemes[disp_sel_end..disp_end_idx].concat();
+                    spans.push(Span::raw(post));
+                }
+                text_spans.push(Spans::from(spans));
+                continue;
+            }
+        }
+        // 選択がなければそのまま表示
+        text_spans.push(Spans::from(Span::raw(disp_text)));
     }
     let paragraph_text = Paragraph::new(text_spans).wrap(Wrap { trim: false });
     frame.render_widget(paragraph_text, chunks[1]);
@@ -728,19 +773,14 @@ fn draw_editor<B: tui::backend::Backend>(
     let total_lines = app.lines.len();
     let mut scrollbar_spans = Vec::new();
     if total_lines <= editor_height {
-        for _ in 0..editor_height {
-            scrollbar_spans.push(Spans::from(" "));
-        }
+        for _ in 0..editor_height { scrollbar_spans.push(Spans::from(" ")); }
     } else {
         let max_scroll = total_lines.saturating_sub(editor_height);
         let ratio = app.scroll_offset as f32 / max_scroll as f32;
         let thumb_row = (ratio * (editor_height - 1) as f32).round() as usize;
         for row in 0..editor_height {
-            if row == thumb_row {
-                scrollbar_spans.push(Spans::from("█"));
-            } else {
-                scrollbar_spans.push(Spans::from(" "));
-            }
+            if row == thumb_row { scrollbar_spans.push(Spans::from("█")); }
+            else { scrollbar_spans.push(Spans::from(" ")); }
         }
     }
     let paragraph_scrollbar = Paragraph::new(scrollbar_spans).wrap(Wrap { trim: false });
@@ -756,13 +796,20 @@ fn draw_editor<B: tui::backend::Backend>(
             cum += g.width();
             if j == app.cursor_x { break; }
         }
-        let cursor_screen_x = cum.saturating_sub(app.h_scroll_offset) as u16;
+        let cursor_screen_x = if app.cursor_x < graphemes.len() {
+            // 行中の場合は1セル左にずらす
+            cum.saturating_sub(app.h_scroll_offset).saturating_sub(1)
+        } else {
+            // 行末の場合はそのままの位置
+            cum.saturating_sub(app.h_scroll_offset)
+        } as u16;
         let cursor_x = chunks[1].x + cursor_screen_x;
         let cursor_y = chunks[1].y + row_in_view as u16;
         frame.set_cursor(cursor_x, cursor_y);
     } else {
         frame.set_cursor(0, 0);
     }
+
 }
 
 fn draw_status_bar<B: tui::backend::Backend>(frame: &mut Frame<B>, app: &App, area: Rect) {
@@ -773,7 +820,7 @@ fn draw_status_bar<B: tui::backend::Backend>(frame: &mut Frame<B>, app: &App, ar
         Mode::FileTree => "FileTree",
     };
     let status_text = format!(
-        "[RWE] {} | lines: {}  Ln {}, Col {}  (Ctrl+S=Save, Esc=Exit/Save, F11=Help, F2=FileTree, F1=Editor)",
+        "[RWE] {} | lines: {}  Ln {}, Col {}  (Ctrl+S=Save, Esc=Popup, F4=Help, F2=FileTree, F1=Editor)",
         mode_text, total_lines, cur_line, cur_col
     );
     let style = match app.mode {
@@ -790,8 +837,8 @@ fn draw_help_screen<B: tui::backend::Backend>(frame: &mut Frame<B>, app: &App) {
 r#"=== Key Bindings Help ===
 
 -- General --
-F11 ....................... Toggle Help
-Esc ....................... Show exit/save popup
+F4 ....................... Toggle Help
+Esc ....................... Show popup (exit/save/cancel)
 
 -- Editor Mode --
 Arrow keys ................ Move cursor (with horizontal scrolling)
@@ -807,12 +854,12 @@ Ctrl + Up/Down ............ Scroll view
 Ctrl + f .................. Search text
 Ctrl + S .................. Save file
 n ......................... New file (popup)
-m ......................... Move/Rename (popup)
-Del ....................... Delete file (in FileTree mode)
+m ......................... Rename/Move (popup)
+Del ....................... Delete (in FileTree mode)
 
 -- FileTree Mode --
 F2 ....................... Switch to FileTree mode
-Number key (1-9) ........ Open corresponding file (line number)
+Number key (1-9) ........ Open corresponding file (by line number)
 Up/Down .................. Navigate entries
 Right ..................... Enter directory
 Left ...................... Go up a directory
@@ -830,16 +877,17 @@ F1 ....................... Switch to Editor mode
 }
 
 fn draw_file_tree<B: tui::backend::Backend>(frame: &mut Frame<B>, app: &App, area: Rect) {
-    // FileTree領域を上下に分割：上部ヘッダー、下部リスト＋スクロールバー
+    // FileTree領域を上下に分割：上部ヘッダー（2行）、中段リスト＋スクロールバー、下部ステータス
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(2), Constraint::Min(1), Constraint::Length(1)].as_ref())
         .split(area);
-    // ヘッダー：現在のパス（省略表示）
+    // ヘッダー：パス表示（2行、折り返し）
     let header = Paragraph::new(format!("Path: {}", app.file_tree.current_path.display()))
-        .style(Style::default().fg(Color::Yellow).bg(Color::Rgb(33, 40, 48)));
+        .wrap(Wrap { trim: true })
+        .style(Style::default().fg(Color::White).bg(Color::Rgb(33, 40, 48)));
     frame.render_widget(header, chunks[0]);
-    // 下部：エントリリストとスクロールバーを左右に分割
+    // 中段：エントリリストとスクロールバーを左右に分割
     let list_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(95), Constraint::Percentage(5)].as_ref())
@@ -847,7 +895,6 @@ fn draw_file_tree<B: tui::backend::Backend>(frame: &mut Frame<B>, app: &App, are
     let ft = &app.file_tree;
     let visible = list_chunks[0].height as usize;
     let mut items = Vec::new();
-    // 各エントリに行番号を付与（1～）
     let mut ft_clone = ft.clone();
     ft_clone.update_scroll(visible);
     for (i, entry) in ft_clone.entries.iter().enumerate().skip(ft_clone.scroll_offset).take(visible) {
@@ -862,16 +909,14 @@ fn draw_file_tree<B: tui::backend::Backend>(frame: &mut Frame<B>, app: &App, are
         items.push(Spans::from(Span::styled(text, style)));
     }
     let list = Paragraph::new(items)
-        .wrap(Wrap { trim: false })
+        .wrap(Wrap { trim: true })
         .style(Style::default().bg(Color::Rgb(33, 40, 48)));
     frame.render_widget(list, list_chunks[0]);
-    // FileTreeスクロールバー
+    // スクロールバー
     let total_entries = ft_clone.entries.len();
     let mut sb_items = Vec::new();
     if total_entries <= visible {
-        for _ in 0..visible {
-            sb_items.push(Spans::from(" "));
-        }
+        for _ in 0..visible { sb_items.push(Spans::from(" ")); }
     } else {
         let max_scroll = total_entries.saturating_sub(visible);
         let ratio = ft_clone.scroll_offset as f32 / max_scroll as f32;
@@ -882,7 +927,7 @@ fn draw_file_tree<B: tui::backend::Backend>(frame: &mut Frame<B>, app: &App, are
         }
     }
     let sb = Paragraph::new(sb_items)
-        .wrap(Wrap { trim: false })
+        .wrap(Wrap { trim: true })
         .style(Style::default().bg(Color::Rgb(33, 40, 48)).fg(Color::LightBlue));
     frame.render_widget(sb, list_chunks[1]);
     // 下部ステータスバー（FileTree用）
@@ -919,13 +964,12 @@ fn draw_file_tree_mode<B: tui::backend::Backend>(frame: &mut Frame<B>, app: &App
 }
 
 fn draw_popup<B: tui::backend::Backend>(frame: &mut Frame<B>, app: &App) {
-    // 中央にオーバーレイ枠を表示
     let size = frame.size();
     let popup_area = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Percentage(40),
-            Constraint::Percentage(20),
+            Constraint::Length(3),
             Constraint::Percentage(40),
         ])
         .split(size)[1];
@@ -941,8 +985,9 @@ fn draw_popup<B: tui::backend::Backend>(frame: &mut Frame<B>, app: &App) {
         PopupMode::ExitPrompt => "Exit Options: (e)xit, (s)ave, (c)ancel",
         PopupMode::NewFile => "New File: Enter file name",
         PopupMode::Rename => "Rename/Move: Enter new name",
+        PopupMode::SaveFile => "Save As: Enter file name",
     };
-    let block = Block::default().title(title).borders(Borders::ALL).style(Style::default().bg(Color::DarkGray));
+    let block = Block::default().title(title).borders(Borders::ALL).style(Style::default().bg(Color::Rgb(33, 40, 48)));
     let paragraph = Paragraph::new(app.popup_input.clone())
         .block(block)
         .wrap(Wrap { trim: true });
@@ -959,7 +1004,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     'main_loop: loop {
         terminal.draw(|frame| {
-            // ポップアップがある場合は全体オーバーレイ
             if let Some(_) = app.popup {
                 draw_popup(frame, &app);
             } else if app.help_visible {
@@ -988,7 +1032,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })?;
 
         if poll(Duration::from_millis(100))? {
-            // ポップアップが表示中なら、その入力処理のみ実施
             if let Some(_) = app.popup {
                 if let Event::Key(KeyEvent { code, .. }) = read()? {
                     app.handle_popup(code);
@@ -996,14 +1039,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
             if let Event::Key(KeyEvent { code, modifiers, .. }) = read()? {
-                // どのモードでも Esc はポップアップで終了／保存確認を表示
+                // Esc キーはどのモードでもポップアップ表示
                 if code == KeyCode::Esc && !modifiers.contains(KeyModifiers::CONTROL) {
                     app.popup = Some(PopupMode::ExitPrompt);
                     app.popup_input.clear();
                     continue;
                 }
-                // F11: ヘルプ切替
-                if code == KeyCode::F(11) {
+                // F4: ヘルプ切替
+                if code == KeyCode::F(4) {
                     app.help_visible = !app.help_visible;
                     continue;
                 }
@@ -1018,10 +1061,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 match app.mode {
                     Mode::Editor => {
-                        // 非ALTならALT加速リセット
-                        if !modifiers.contains(KeyModifiers::ALT) {
-                            app.alt_n = 8;
-                        }
+                        if !modifiers.contains(KeyModifiers::ALT) { app.alt_n = 8; }
                         if code == KeyCode::Char('s') && modifiers == KeyModifiers::CONTROL {
                             app.save_file();
                             continue;
@@ -1073,7 +1113,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue;
                         }
                         if code == KeyCode::Delete {
-                            // Deleteキーでファイル（Editor内なら削除対象選択を消去）
                             app.backspace();
                             continue;
                         }
@@ -1132,12 +1171,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     Mode::FileTree => {
-                        // FileTree内では、数字キーで行番号選択でファイルを開く
                         if let KeyCode::Char(c) = code {
                             if c.is_digit(10) {
                                 let idx = c.to_digit(10).unwrap() as usize;
-                                // 画面上に表示されている行番号（1から）に対応
-                                let visible =  (terminal.size().unwrap().height.saturating_sub(3)) as usize;
+                                let visible = (terminal.size().unwrap().height.saturating_sub(3)) as usize;
                                 let target = app.file_tree.scroll_offset + idx - 1;
                                 if target < app.file_tree.entries.len() {
                                     app.file_tree.selected = target;
@@ -1153,9 +1190,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             KeyCode::Left => { app.file_tree_go_up(); }
                             KeyCode::Enter => { app.file_tree_enter(); }
                             KeyCode::Delete => { app.file_tree_delete(); }
-                            KeyCode::Char('s') if modifiers == KeyModifiers::CONTROL => {
-                                app.save_file();
-                            }
+                            KeyCode::Char('s') if modifiers == KeyModifiers::CONTROL => { app.save_file(); }
                             _ => {}
                         }
                     }
